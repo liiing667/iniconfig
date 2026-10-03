@@ -412,3 +412,158 @@ def test_unicode_whitespace_in_key_names() -> None:
     )
     assert "key" in config["section"]
     assert config["section"]["key"] == "value"
+
+
+ROUNDTRIP_DATA = (
+    "# leading comment\n"
+    "\n"
+    "[section1] # comment\n"
+    'key = "value with spaces"\n'
+    "path = C:\\dir\\file\n"
+    "hashy = #starts with hash\n"
+    "semi = ;starts with semicolon\n"
+    "names =\n"
+    "    Alice\n"
+    "    Bob\n"
+    "\n"
+    "; another comment\n"
+    "[section2]\n"
+    "empty =\n"
+    "flag: yes\n"
+)
+
+
+def test_dump_unchanged_is_byte_identical() -> None:
+    config = IniConfig("x.ini", data=ROUNDTRIP_DATA)
+    assert config.dump() == ROUNDTRIP_DATA
+
+
+def test_dump_roundtrip_values() -> None:
+    config = IniConfig("x.ini", data=ROUNDTRIP_DATA)
+    reparsed = IniConfig("y.ini", data=config.dump())
+    assert reparsed.sections == config.sections
+    assert reparsed.get("section1", "key") == '"value with spaces"'
+    assert reparsed.get("section1", "path") == "C:\\dir\\file"
+    assert reparsed.get("section1", "hashy") == "#starts with hash"
+    assert reparsed.get("section1", "semi") == ";starts with semicolon"
+    assert reparsed.get("section1", "names") == "Alice\nBob"
+
+
+def test_write_roundtrip_via_file(tmp_path: Path) -> None:
+    path = tmp_path / "config.ini"
+    path.write_text(ROUNDTRIP_DATA, encoding="utf-8")
+    config = IniConfig(str(path))
+    with open(path, "w", encoding="utf-8") as fp:
+        config.write(fp)
+    reparsed = IniConfig(str(path))
+    assert reparsed.sections == config.sections
+
+
+def test_dump_modified_value_preserves_comments_and_order() -> None:
+    data = (
+        "[section]\n"
+        "# a comment\n"
+        "a = 1\n"
+        "b = 2 # trailing\n"
+        "\n"
+        "[other]\n"
+        "c = 3\n"
+    )
+    config = IniConfig("x.ini", data=data)
+    config.sections["section"]["a"] = "changed"  # type: ignore[index]
+    out = config.dump()
+    assert "# a comment" in out
+    assert "b = 2 # trailing" in out
+    assert "a = changed" in out
+    # key order is preserved
+    assert out.index("a = changed") < out.index("b = 2")
+    assert out.index("[section]") < out.index("[other]")
+    reparsed = IniConfig("y.ini", data=out)
+    assert reparsed.sections == config.sections
+    assert reparsed.get("section", "a") == "changed"
+    assert reparsed.get("section", "b") == "2 # trailing"
+
+
+def test_dump_modified_multiline_value() -> None:
+    config = IniConfig("x.ini", data="[s]\nnames =\n    Alice\n    Bob\n")
+    config.sections["s"]["names"] = "Carol\nDave"  # type: ignore[index]
+    out = config.dump()
+    assert "names = Carol\n    Dave" in out
+    reparsed = IniConfig("y.ini", data=out)
+    assert reparsed.get("s", "names") == "Carol\nDave"
+
+
+def test_dump_modified_value_drops_old_continuations() -> None:
+    config = IniConfig("x.ini", data="[s]\nnames =\n    Alice\n    Bob\nk = 1\n")
+    config.sections["s"]["names"] = "solo"  # type: ignore[index]
+    out = config.dump()
+    reparsed = IniConfig("y.ini", data=out)
+    assert reparsed.get("s", "names") == "solo"
+    assert reparsed.get("s", "k") == "1"
+
+
+def test_dump_new_key_and_new_section() -> None:
+    config = IniConfig("x.ini", data="[s]\na = 1\n")
+    config.sections["s"]["b"] = "2"  # type: ignore[index]
+    config.sections["new"] = {"k": "v"}  # type: ignore[index]
+    out = config.dump()
+    reparsed = IniConfig("y.ini", data=out)
+    assert reparsed.sections == config.sections
+    assert reparsed.get("s", "b") == "2"
+    assert reparsed.get("new", "k") == "v"
+    assert out.index("a = 1") < out.index("b = 2")
+
+
+def test_dump_removed_key_and_section() -> None:
+    data = "[s]\na = 1\nb = 2\n\n[gone]\nx = 1\n"
+    config = IniConfig("x.ini", data=data)
+    del config.sections["s"]["a"]  # type: ignore[attr-defined]
+    del config.sections["gone"]  # type: ignore[attr-defined]
+    out = config.dump()
+    reparsed = IniConfig("y.ini", data=out)
+    assert reparsed.sections == config.sections
+    assert "gone" not in reparsed
+    assert reparsed.get("s", "a") is None
+    assert reparsed.get("s", "b") == "2"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "line1\n\nline3",  # blank line inside a value
+        "trailing\n",  # trailing bare newline
+        "  padded  ",  # leading/trailing whitespace would be stripped
+        "carriage\rreturn",
+    ],
+)
+def test_dump_raises_valueerror_for_unsafe_values(value: str) -> None:
+    config = IniConfig("x.ini", data="[s]\na = 1\n")
+    config.sections["s"]["a"] = value  # type: ignore[index]
+    with pytest.raises(ValueError):
+        config.dump()
+
+
+def test_write_does_not_touch_file_on_valueerror(tmp_path: Path) -> None:
+    path = tmp_path / "config.ini"
+    path.write_text("[s]\na = 1\n", encoding="utf-8")
+    config = IniConfig(str(path))
+    config.sections["s"]["a"] = "bad\n\nvalue"  # type: ignore[index]
+    with pytest.raises(ValueError), open(path, "w", encoding="utf-8") as fp:
+        config.write(fp)
+
+
+def test_dump_crlf_preserved() -> None:
+    data = "[s]\r\na = 1\r\n"
+    config = IniConfig("x.ini", data=data)
+    assert config.dump() == data
+    config.sections["s"]["b"] = "2"  # type: ignore[index]
+    out = config.dump()
+    assert "b = 2\r\n" in out
+    assert IniConfig("y.ini", data=out).sections == config.sections
+
+
+def test_dump_from_parse_with_inline_comment_stripping() -> None:
+    config = IniConfig.parse("x.ini", data="[s]\na = 1 # note\n")
+    assert config.get("s", "a") == "1"
+    reparsed = IniConfig.parse("y.ini", data=config.dump())
+    assert reparsed.sections == config.sections

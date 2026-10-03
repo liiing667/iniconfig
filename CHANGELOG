@@ -1,3 +1,13 @@
+unreleased
+==========
+
+* add IniConfig.dump() and IniConfig.write(fp) for writing configuration back
+  - unchanged sections/entries are emitted from the original text, preserving
+    comments, blank lines and key order
+  - changed/added values are serialized so the parser reads back identical values
+  - raises ValueError for values that cannot be written without information loss
+    (e.g. values containing blank lines or leading/trailing whitespace)
+
 2.3.0
 =====
 

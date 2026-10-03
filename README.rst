@@ -7,6 +7,7 @@ having a unique set of features:
 * maintains order of sections and entries
 * supports multi-line values with or without line-continuations
 * supports "#" comments everywhere
+* supports writing changes back via ``IniConfig.dump()``/``IniConfig.write()``
 * raises errors with proper line-numbers
 * no bells and whistles like automatic substitutions
 * iniconfig raises an Error if two sections have the same name.
@@ -52,3 +53,12 @@ then you can do:
     True
     >>> 'inexistendsection' in ini
     False
+
+Modified values can be written back; unchanged parts of the file
+(comments, blank lines, key order) are preserved:
+
+.. code-block:: pycon
+
+    >>> ini.sections['section1']['name1'] = 'newvalue'
+    >>> with open('example.ini', 'w') as fp:
+    ...     ini.write(fp)  # raises ValueError if a value cannot be written safely
