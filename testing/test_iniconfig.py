@@ -412,3 +412,145 @@ def test_unicode_whitespace_in_key_names() -> None:
     )
     assert "key" in config["section"]
     assert config["section"]["key"] == "value"
+
+
+ROUNDTRIP_DATA = """\
+# top comment
+[section1] # trailing comment
+key = "值带空格"
+path = C:\\dir\\file
+hash = #starts with hash
+semi = ;starts with semi
+multi =
+    line1
+    line2
+
+; another comment
+[section2]
+a = 1
+b = 2
+"""
+
+
+def test_dump_unmodified_is_identical() -> None:
+    config = IniConfig("test.ini", ROUNDTRIP_DATA)
+    assert config.dump() == ROUNDTRIP_DATA
+
+
+def test_dump_roundtrip_values() -> None:
+    config = IniConfig("test.ini", ROUNDTRIP_DATA)
+    reread = IniConfig("test.ini", config.dump())
+    assert config.sections == reread.sections
+
+
+def test_dump_roundtrip_with_parse() -> None:
+    config = IniConfig.parse("test.ini", ROUNDTRIP_DATA)
+    reread = IniConfig.parse("test.ini", config.dump())
+    assert config.sections == reread.sections
+
+
+def test_write_to_file(tmp_path: Path) -> None:
+    path = tmp_path / "test.ini"
+    path.write_text(ROUNDTRIP_DATA, encoding="utf-8")
+    config = IniConfig(str(path))
+    config.sections["section1"]["key"] = '"changed"'
+    with path.open("w", encoding="utf-8") as fp:
+        config.write(fp)
+    reread = IniConfig(str(path))
+    assert reread["section1"]["key"] == '"changed"'
+    assert reread["section1"]["path"] == "C:\\dir\\file"
+    assert reread["section1"]["multi"] == "line1\nline2"
+
+
+def test_dump_preserves_comments_and_order_on_change() -> None:
+    config = IniConfig("test.ini", ROUNDTRIP_DATA)
+    config.sections["section2"]["b"] = "changed"
+    config.sections["section2"]["c"] = "added"
+    out = config.dump()
+    assert "# top comment" in out
+    assert "; another comment" in out
+    assert "[section1] # trailing comment" in out
+    # key order of untouched entries is preserved
+    assert out.index("a = 1") < out.index("b = changed") < out.index("c = added")
+    reread = IniConfig("test.ini", out)
+    assert reread["section2"]["b"] == "changed"
+    assert reread["section2"]["c"] == "added"
+
+
+def test_dump_modified_multiline_value() -> None:
+    config = IniConfig("test.ini", ROUNDTRIP_DATA)
+    config.sections["section1"]["multi"] = "one\ntwo\nthree"
+    reread = IniConfig("test.ini", config.dump())
+    assert reread["section1"]["multi"] == "one\ntwo\nthree"
+
+
+def test_dump_new_section_appended() -> None:
+    config = IniConfig("test.ini", "[s]\na = 1\n")
+    config.sections["new"] = {"x": "y"}
+    out = config.dump()
+    assert out == "[s]\na = 1\n[new]\nx = y\n"
+    assert IniConfig("test.ini", out)["new"]["x"] == "y"
+
+
+def test_dump_removed_key_and_section() -> None:
+    config = IniConfig("test.ini", "[s]\na = 1\nb = 2\n[t]\nc = 3\n")
+    del config.sections["s"]["b"]
+    del config.sections["t"]
+    out = config.dump()
+    assert out == "[s]\na = 1\n"
+    assert IniConfig("test.ini", out).sections == {"s": {"a": "1"}}
+
+
+def test_dump_no_trailing_newline() -> None:
+    config = IniConfig("test.ini", "[s]\nb = 2")
+    assert config.dump() == "[s]\nb = 2"
+    config.sections["s"]["c"] = "3"
+    assert config.dump() == "[s]\nb = 2\nc = 3\n"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        " leading",
+        "trailing ",
+        "a\n\nb",  # empty line inside a multi-line value
+        "a\n#comment",  # continuation would be read as a comment
+        "a\n;comment",
+        "a\n b",  # leading whitespace on a continuation line
+        "\na",  # empty first line
+        "a\rb",  # bare carriage return
+    ],
+)
+def test_dump_unsafe_value_raises(value: str) -> None:
+    config = IniConfig("test.ini", "[s]\nk = v\n")
+    config.sections["s"]["k"] = value
+    with pytest.raises(ValueError):
+        config.dump()
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",
+        " spaced ",
+        "a=b",
+        "a:b",
+        "#comment",
+        ";comment",
+        "[section]",
+        "a\nb",
+    ],
+)
+def test_dump_unsafe_key_raises(key: str) -> None:
+    config = IniConfig("test.ini", "[s]\nk = v\n")
+    config.sections["s"][key] = "value"
+    with pytest.raises(ValueError):
+        config.dump()
+
+
+@pytest.mark.parametrize("section", ["", "a#b", "a;b", "a\nb"])
+def test_dump_unsafe_section_name_raises(section: str) -> None:
+    config = IniConfig("test.ini", "[s]\nk = v\n")
+    config.sections[section] = {"k": "v"}
+    with pytest.raises(ValueError):
+        config.dump()

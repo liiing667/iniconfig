@@ -19,7 +19,11 @@ def parse_ini_data(
     *,
     strip_inline_comments: bool,
     strip_section_whitespace: bool = False,
-) -> tuple[Mapping[str, Mapping[str, str]], Mapping[tuple[str, str | None], int]]:
+) -> tuple[
+    Mapping[str, Mapping[str, str]],
+    Mapping[tuple[str, str | None], int],
+    Mapping[tuple[str, str | None], tuple[int, int]],
+]:
     """Parse INI data and return sections and sources mappings.
 
     Args:
@@ -30,11 +34,13 @@ def parse_ini_data(
             (default: False). When True, addresses issue #4 by stripping Unicode whitespace.
 
     Returns:
-        Tuple of (sections_data, sources) where:
+        Tuple of (sections_data, sources, spans) where:
         - sections_data: mapping of section -> {name -> value}
         - sources: mapping of (section, name) -> line number
+        - spans: mapping of (section, name) -> (first_line, last_line) inclusive,
+          covering all physical lines an entry occupies (including continuations)
     """
-    tokens = parse_lines(
+    tokens, token_spans = _parse_lines_full(
         path,
         data.splitlines(True),
         strip_inline_comments=strip_inline_comments,
@@ -42,12 +48,14 @@ def parse_ini_data(
     )
 
     sources: dict[tuple[str, str | None], int] = {}
+    spans: dict[tuple[str, str | None], tuple[int, int]] = {}
     sections_data: dict[str, dict[str, str]] = {}
 
-    for lineno, section, name, value in tokens:
+    for (lineno, section, name, value), span in zip(tokens, token_spans):
         if section is None:
             raise ParseError(path, lineno, "no section header defined")
         sources[section, name] = lineno
+        spans[section, name] = span
         if name is None:
             if section in sections_data:
                 raise ParseError(path, lineno, f"duplicate section {section!r}")
@@ -58,7 +66,7 @@ def parse_ini_data(
             assert value is not None
             sections_data[section][name] = value
 
-    return sections_data, sources
+    return sections_data, sources, spans
 
 
 def parse_lines(
@@ -68,7 +76,24 @@ def parse_lines(
     strip_inline_comments: bool = False,
     strip_section_whitespace: bool = False,
 ) -> list[ParsedLine]:
+    tokens, _ = _parse_lines_full(
+        path,
+        line_iter,
+        strip_inline_comments=strip_inline_comments,
+        strip_section_whitespace=strip_section_whitespace,
+    )
+    return tokens
+
+
+def _parse_lines_full(
+    path: str,
+    line_iter: list[str],
+    *,
+    strip_inline_comments: bool = False,
+    strip_section_whitespace: bool = False,
+) -> tuple[list[ParsedLine], list[tuple[int, int]]]:
     result: list[ParsedLine] = []
+    spans: list[tuple[int, int]] = []
     section = None
     for lineno, line in enumerate(line_iter):
         name, data = _parseline(
@@ -77,17 +102,20 @@ def parse_lines(
         # new value
         if name is not None and data is not None:
             result.append(ParsedLine(lineno, section, name, data))
+            spans.append((lineno, lineno))
         # new section
         elif name is not None and data is None:
             if not name:
                 raise ParseError(path, lineno, "empty section name")
             section = name
             result.append(ParsedLine(lineno, section, None, None))
+            spans.append((lineno, lineno))
         # continuation
         elif name is None and data is not None:
             if not result:
                 raise ParseError(path, lineno, "unexpected value continuation")
             last = result.pop()
+            start, _ = spans.pop()
             if last.name is None:
                 raise ParseError(path, lineno, "unexpected value continuation")
 
@@ -96,7 +124,8 @@ def parse_lines(
             else:
                 last = last._replace(value=data)
             result.append(last)
-    return result
+            spans.append((start, lineno))
+    return result, spans
 
 
 def _parseline(

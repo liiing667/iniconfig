@@ -1,3 +1,17 @@
+2.4.0
+=====
+
+* add IniConfig.write() and IniConfig.dump() for writing configurations back
+  - dump() serializes to ini text, write(fp) writes it to a file object
+  - unmodified sections, keys, comments and blank lines are preserved exactly
+    as read, keeping the original order and formatting
+  - changed or added entries are re-serialized so that reading the output back
+    yields the exact same values (quotes, backslashes, leading comment
+    characters and multi-line values included)
+  - keys, section names or values that cannot be written safely (e.g. values
+    with leading/trailing whitespace or empty lines inside multi-line values)
+    raise ValueError instead of silently producing a broken file
+
 2.3.0
 =====
 

@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from typing import IO
 from typing import Final
 from typing import TypeVar
 from typing import overload
@@ -13,6 +14,7 @@ from typing import overload
 __all__ = ["IniConfig", "ParseError", "COMMENTCHARS", "iscommentline"]
 
 from . import _parse
+from . import _write
 from ._parse import COMMENTCHARS
 from ._parse import iscommentline
 from .exceptions import ParseError
@@ -90,6 +92,9 @@ class IniConfig:
     path: Final[str]
     sections: Final[Mapping[str, Mapping[str, str]]]
     _sources: Final[Mapping[tuple[str, str | None], int]]
+    _lines: Final[list[str]]
+    _spans: Final[Mapping[tuple[str, str | None], tuple[int, int]]]
+    _parsed_sections: Final[Mapping[str, Mapping[str, str]]]
 
     def __init__(
         self,
@@ -99,6 +104,8 @@ class IniConfig:
         *,
         _sections: Mapping[str, Mapping[str, str]] | None = None,
         _sources: Mapping[tuple[str, str | None], int] | None = None,
+        _lines: list[str] | None = None,
+        _spans: Mapping[tuple[str, str | None], tuple[int, int]] | None = None,
     ) -> None:
         self.path = os.fspath(path)
 
@@ -107,6 +114,8 @@ class IniConfig:
             # Use provided pre-parsed data (called from parse())
             sections_data = _sections
             sources = _sources
+            lines = _lines if _lines is not None else []
+            spans = _spans if _spans is not None else {}
         else:
             # Parse the data (backward compatible path)
             if data is None:
@@ -114,13 +123,20 @@ class IniConfig:
                     data = fp.read()
 
             # Use old behavior (no stripping) for backward compatibility
-            sections_data, sources = _parse.parse_ini_data(
+            sections_data, sources, spans = _parse.parse_ini_data(
                 self.path, data, strip_inline_comments=False
             )
+            lines = data.splitlines(True)
 
         # Assign once to Final attributes
         self._sources = sources
         self.sections = sections_data
+        self._lines = lines
+        self._spans = spans
+        # snapshot of the parsed values, used to detect modifications on dump()
+        self._parsed_sections = {
+            section: dict(values) for section, values in sections_data.items()
+        }
 
     @classmethod
     def parse(
@@ -167,7 +183,7 @@ class IniConfig:
             with open(fspath, encoding=encoding) as fp:
                 data = fp.read()
 
-        sections_data, sources = _parse.parse_ini_data(
+        sections_data, sources, spans = _parse.parse_ini_data(
             fspath,
             data,
             strip_inline_comments=strip_inline_comments,
@@ -175,7 +191,13 @@ class IniConfig:
         )
 
         # Call constructor with pre-parsed sections and sources
-        return cls(path=fspath, _sections=sections_data, _sources=sources)
+        return cls(
+            path=fspath,
+            _sections=sections_data,
+            _sources=sources,
+            _lines=data.splitlines(True),
+            _spans=spans,
+        )
 
     def lineof(self, section: str, name: str | None = None) -> int | None:
         lineno = self._sources.get((section, name))
@@ -240,6 +262,105 @@ class IniConfig:
         if name not in self.sections:
             raise KeyError(name)
         return SectionWrapper(self, name)
+
+    def dump(self) -> str:
+        """Serialize the configuration back to ini text.
+
+        Sections, keys, comments and blank lines that were not modified
+        through the ``sections`` mapping are reproduced exactly as they
+        were read, preserving order and formatting.  Changed, added or
+        removed entries are re-serialized in place; keys added to an
+        existing section are appended at the end of that section and new
+        sections are appended at the end of the file.
+
+        Returns:
+            The configuration as ini text.
+
+        Raises:
+            ValueError: If a key, section name or value cannot be
+                written in a way that parses back to the exact same
+                data (for example values with leading/trailing
+                whitespace, empty lines inside multi-line values, or
+                continuation lines starting with a comment character).
+        """
+        lines = self._lines
+        current = self.sections
+        parsed = self._parsed_sections
+
+        replacements: dict[int, list[str]] = {}
+        skipped: set[int] = set()
+        section_end: dict[str, int] = {}
+
+        for (section, name), (start, end) in self._spans.items():
+            section_end[section] = max(section_end.get(section, 0), end + 1)
+            skipped.update(range(start, end + 1))
+            if name is None:
+                # section headers never change, keep them verbatim
+                replacements[start] = lines[start : end + 1] if section in current else []
+                continue
+            values = current.get(section)
+            if values is None or name not in values:
+                # the key (or its whole section) was removed
+                replacements[start] = []
+            elif parsed[section][name] == values[name]:
+                # unchanged entries are copied verbatim
+                replacements[start] = lines[start : end + 1]
+            else:
+                replacements[start] = _write.serialize_entry(name, values[name])
+
+        inserts: dict[int, list[str]] = {}
+        for section, values in current.items():
+            known = parsed.get(section)
+            if known is None:
+                continue  # brand-new sections are handled below
+            added = [
+                line
+                for name, value in values.items()
+                if name not in known
+                for line in _write.serialize_entry(name, value)
+            ]
+            if added:
+                pos = section_end.get(section, len(lines))
+                inserts.setdefault(pos, []).extend(added)
+
+        trailer: list[str] = []
+        for section, values in current.items():
+            if section in parsed:
+                continue
+            _write.validate_section_name(section)
+            trailer.append(f"[{section}]\n")
+            for name, value in values.items():
+                trailer.extend(_write.serialize_entry(name, value))
+        if trailer:
+            inserts.setdefault(len(lines), []).extend(trailer)
+
+        out: list[str] = []
+        for pos in range(len(lines) + 1):
+            pending = inserts.get(pos)
+            if pending:
+                if out and not out[-1].endswith("\n"):
+                    out[-1] += "\n"
+                out.extend(pending)
+            if pos == len(lines):
+                break
+            replacement = replacements.get(pos)
+            if replacement is not None:
+                out.extend(replacement)
+            elif pos not in skipped:
+                out.append(lines[pos])
+        return "".join(out)
+
+    def write(self, fp: IO[str]) -> None:
+        """Write the configuration to a text file object.
+
+        This is a thin wrapper around :meth:`dump`, see its documentation
+        for details on formatting guarantees and errors.
+
+        Example:
+            with open(config.path, "w", encoding="utf-8") as fp:
+                config.write(fp)
+        """
+        fp.write(self.dump())
 
     def __iter__(self) -> Iterator[SectionWrapper]:
         for name in sorted(self.sections, key=self.lineof):  # type: ignore

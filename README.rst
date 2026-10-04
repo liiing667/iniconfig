@@ -52,3 +52,21 @@ then you can do:
     True
     >>> 'inexistendsection' in ini
     False
+
+Writing
+===================================
+
+Modifications made through the ``sections`` mapping can be written
+back with :meth:`IniConfig.dump` (returns ini text) or
+:meth:`IniConfig.write` (writes to an open text file):
+
+.. code-block:: pycon
+
+    >>> ini['section1']['name1'] = 'new value'
+    >>> with open("example.ini", "w", encoding="utf-8") as fp:
+    ...     ini.write(fp)
+
+Unchanged sections, keys, comments and blank lines are preserved
+exactly as they were read.  Values that cannot be written so that they
+parse back unchanged (e.g. values with leading or trailing whitespace
+or empty lines inside multi-line values) raise :class:`ValueError`.
